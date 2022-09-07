@@ -113,7 +113,7 @@ public abstract class AbstractAzResourceModule<T extends AbstractAzResource<T, P
         if (System.currentTimeMillis() - this.syncTimeRef.get() > AzResource.CACHE_LIFETIME) { // 0, -1 or too old.
             try {
                 this.lock.lock();
-                if (this.syncTimeRef.get() != 0 && System.currentTimeMillis() - this.syncTimeRef.get() > AzResource.CACHE_LIFETIME) {// -1 or too old.
+                if (this.syncTimeRef.get() != 0 && System.currentTimeMillis() - this.syncTimeRef.get() > AzResource.CACHE_LIFETIME) { // -1 or too old.
                     log.debug("[{}]:list->this.reload()", this.name);
                     this.reloadResources();
                 }
@@ -126,13 +126,13 @@ public abstract class AbstractAzResourceModule<T extends AbstractAzResource<T, P
             .sorted(Comparator.comparing(AbstractAzResource::getName)).collect(Collectors.toList());
     }
 
-    private void reloadResources() {
+    protected void reloadResources() {
         log.debug("[{}]:reloadResources()", this.name);
         this.syncTimeRef.set(0);
         try {
             log.debug("[{}]:reloadResources->loadResourcesFromAzure()", this.name);
             final Map<String, R> loadedResources = this.loadResourcesFromAzure()
-                .collect(Collectors.toMap(this::getResourceId, r -> r));
+                .collect(Collectors.toMap(r -> this.getResourceId(r).toLowerCase(), r -> r));
             log.debug("[{}]:reloadResources->setResources(xxx)", this.name);
             this.setResources(loadedResources);
         } catch (Exception e) {
@@ -206,6 +206,7 @@ public abstract class AbstractAzResourceModule<T extends AbstractAzResource<T, P
         Azure.az(IAzureAccount.class).account();
         final String id = this.toResourceId(name, resourceGroup).toLowerCase();
         if (!this.resources.containsKey(id)) {
+            this.addResourceToLocal(id, null, true);
             R remote = null;
             try {
                 log.debug("[{}]:get({}, {})->loadResourceFromAzure()", this.name, name, resourceGroup);
@@ -225,7 +226,8 @@ public abstract class AbstractAzResourceModule<T extends AbstractAzResource<T, P
                 this.addResourceToLocal(id, null, true);
             } else {
                 final T resource = newResource(remote);
-                resource.setRemote(remote);
+                final R finalRemote = remote;
+                AzureTaskManager.getInstance().runOnPooledThread(() -> resource.setRemote(finalRemote));
                 log.debug("[{}]:get({}, {})->addResourceToLocal({}, resource)", this.name, name, resourceGroup, name);
                 this.addResourceToLocal(resource.getId(), resource, true);
             }
@@ -329,8 +331,8 @@ public abstract class AbstractAzResourceModule<T extends AbstractAzResource<T, P
             final ResourceGroup resourceGroup = resource.getResourceGroup();
             if (Objects.isNull(id.parent()) && Objects.nonNull(resourceGroup) && !(resource instanceof ResourceGroup)) {
                 final GenericResourceModule genericResourceModule = resourceGroup.genericResources();
-                //noinspection unchecked
-                genericResourceModule.addResourceToLocal(resource.getId(), resource);
+                // noinspection unchecked,rawtypes
+                ((AbstractAzResourceModule) genericResourceModule).addResourceToLocal(resource.getId(), resource);
             }
             log.debug("[{}]:create->doModify(draft.createResourceInAzure({}))", this.name, resource);
             try {
@@ -399,9 +401,8 @@ public abstract class AbstractAzResourceModule<T extends AbstractAzResource<T, P
     protected void addResourceToLocal(@Nonnull String id, @Nullable T resource, boolean... silent) {
         log.debug("[{}]:addResourceToLocal({}, {})", this.name, id, resource);
         id = id.toLowerCase();
-        final Optional<T> oldResource = this.resources.getOrDefault(id, Optional.empty());
         final Optional<T> newResource = Optional.ofNullable(resource);
-        if (!oldResource.isPresent()) {
+        if (!this.isCached(id)) {
             log.debug("[{}]:addResourceToLocal->this.resources.put({}, {})", this.name, id, resource);
             this.resources.put(id, newResource);
             if (newResource.isPresent() && (silent.length == 0 || !silent[0])) {
@@ -409,6 +410,10 @@ public abstract class AbstractAzResourceModule<T extends AbstractAzResource<T, P
                 fireEvents.debounce();
             }
         }
+    }
+
+    protected boolean isCached(@Nonnull String id) {
+        return this.resources.getOrDefault(id, Optional.empty()).isPresent();
     }
 
     private void fireChildrenChangedEvent() {

@@ -9,6 +9,7 @@ import com.azure.resourcemanager.resources.ResourceManager;
 import com.azure.resourcemanager.resources.fluentcore.arm.ResourceId;
 import com.azure.resourcemanager.resources.models.GenericResources;
 import com.microsoft.azure.toolkit.lib.Azure;
+import com.microsoft.azure.toolkit.lib.common.exception.AzureToolkitRuntimeException;
 import com.microsoft.azure.toolkit.lib.common.model.AbstractAzResource;
 import com.microsoft.azure.toolkit.lib.common.model.AbstractAzResourceModule;
 import com.microsoft.azure.toolkit.lib.common.operation.AzureOperation;
@@ -34,6 +35,12 @@ public class GenericResourceModule extends AbstractAzResourceModule {
         return Optional.ofNullable(parent.getRemote()).map(ResourceManager::genericResources).orElse(null);
     }
 
+    @Override
+    public void refresh() {
+        this.clear();
+        super.refresh();
+    }
+
     @Nonnull
     @Override
     @AzureOperation(name = "resource.list_resources.type", params = {"this.getResourceTypeName()"}, type = AzureOperation.Type.SERVICE)
@@ -41,6 +48,16 @@ public class GenericResourceModule extends AbstractAzResourceModule {
         final GenericResources resources = Objects.requireNonNull(this.getClient());
         return resources.listByResourceGroup(this.parent.getName()).stream()
             .filter(r -> Objects.isNull(ResourceId.fromString(r.id()).parent())); // only keep top resources.
+    }
+
+    @Override
+    protected void addResourceToLocal(@Nonnull String id, @Nullable AbstractAzResource resource, boolean... silent) {
+        if (!this.isCached(id)) {
+            if (resource instanceof GenericResource) {
+                resource = Optional.ofNullable(Azure.az().getById(id)).orElse(resource);
+            }
+            super.addResourceToLocal(id, resource, silent);
+        }
     }
 
     @Nonnull
@@ -53,21 +70,16 @@ public class GenericResourceModule extends AbstractAzResourceModule {
     protected AbstractAzResource<?, ?, ?> newResource(@Nonnull Object r) {
         if (r instanceof com.azure.resourcemanager.resources.models.GenericResource) {
             final com.azure.resourcemanager.resources.models.GenericResource gr = (com.azure.resourcemanager.resources.models.GenericResource) r;
-            final AbstractAzResource<?, ?, ?> concrete = Azure.az().getOrInitById(gr.id());
-            if (Objects.isNull(concrete)) {
-                return new GenericResource(gr, this);
-            } else {
-                return concrete;
-            }
+            return new GenericResource(gr, this);
         } else if (r instanceof AbstractAzResource) {
             return (AbstractAzResource<?, ?, ?>) r;
         }
-        throw new UnsupportedOperationException("not supported");
+        throw new AzureToolkitRuntimeException("not supported");
     }
 
     @Nonnull
     protected AbstractAzResource<?, ?, ?> newResource(@Nonnull String resourceId, @Nullable String resourceGroupName) {
-        throw new UnsupportedOperationException("not supported");
+        return new GenericResource(resourceId, this);
     }
 
     @Nonnull

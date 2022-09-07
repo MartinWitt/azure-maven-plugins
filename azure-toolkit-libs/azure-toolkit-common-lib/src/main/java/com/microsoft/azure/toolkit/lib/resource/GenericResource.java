@@ -18,6 +18,11 @@ public class GenericResource extends AbstractAzResource<GenericResource, Resourc
 
     private final ResourceId resourceId;
 
+    protected GenericResource(@Nonnull String resourceId, @Nonnull GenericResourceModule module) {
+        super(resourceId, ResourceId.fromString(resourceId).resourceGroupName(), module);
+        this.resourceId = ResourceId.fromString(resourceId);
+    }
+
     /**
      * copy constructor
      */
