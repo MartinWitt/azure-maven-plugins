@@ -9,15 +9,15 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.PrettyPrinter;
 import com.fasterxml.jackson.core.util.DefaultIndenter;
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.microsoft.applicationinsights.core.dependencies.apachecommons.lang3.StringUtils;
 import com.microsoft.azure.maven.model.DeploymentResource;
-import com.microsoft.azure.toolkit.lib.common.utils.Utils;
 import com.microsoft.azure.toolkit.lib.common.exception.AzureExecutionException;
+import com.microsoft.azure.toolkit.lib.common.logging.Log;
+import com.microsoft.azure.toolkit.lib.common.operation.AzureOperation;
+import com.microsoft.azure.toolkit.lib.common.utils.Utils;
 import com.microsoft.azure.toolkit.lib.legacy.function.bindings.Binding;
 import com.microsoft.azure.toolkit.lib.legacy.function.bindings.BindingEnum;
 import com.microsoft.azure.toolkit.lib.legacy.function.configurations.FunctionConfiguration;
@@ -27,10 +27,10 @@ import com.microsoft.azure.toolkit.lib.legacy.function.handlers.CommandHandler;
 import com.microsoft.azure.toolkit.lib.legacy.function.handlers.CommandHandlerImpl;
 import com.microsoft.azure.toolkit.lib.legacy.function.handlers.FunctionCoreToolsHandler;
 import com.microsoft.azure.toolkit.lib.legacy.function.handlers.FunctionCoreToolsHandlerImpl;
-import com.microsoft.azure.toolkit.lib.common.logging.Log;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
-import org.apache.commons.io.input.BOMInputStream;
+import org.apache.commons.lang3.BooleanUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
@@ -38,8 +38,8 @@ import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.plugins.annotations.ResolutionScope;
 
+import javax.annotation.Nonnull;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.MalformedURLException;
@@ -52,7 +52,8 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Scanner;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -71,13 +72,13 @@ public class PackageMojo extends AbstractFunctionMojo {
     public static final String VALIDATE_CONFIG = "Step 3 of 8: Validating generated configurations";
     public static final String VALIDATE_SKIP = "No configurations found. Skip validation.";
     public static final String VALIDATE_DONE = "Validation done.";
-    public static final String SAVING_HOST_JSON = "Step 4 of 8: Saving host.json";
-    public static final String SAVING_LOCAL_SETTINGS_JSON = "Step 5 of 8: Saving local.settings.json";
+    public static final String SAVING_HOST_JSON = "Step 4 of 8: Copying/creating host.json";
+    public static final String SAVING_LOCAL_SETTINGS_JSON = "Step 5 of 8: Copying/creating local.settings.json";
     public static final String SAVE_FUNCTION_JSONS = "Step 6 of 8: Saving configurations to function.json";
     public static final String SAVE_SKIP = "No configurations found. Skip save.";
     public static final String SAVE_FUNCTION_JSON = "Starting processing function: ";
     public static final String SAVE_SUCCESS = "Successfully saved to ";
-    public static final String COPY_JARS = "Step 7 of 8: Copying JARs to staging directory";
+    public static final String COPY_JARS = "Step 7 of 8: Copying JARs to staging directory ";
     public static final String COPY_SUCCESS = "Copied successfully.";
     public static final String INSTALL_EXTENSIONS = "Step 8 of 8: Installing function extensions if needed";
     public static final String SKIP_INSTALL_EXTENSIONS_HTTP = "Skip install Function extension for HTTP Trigger Functions";
@@ -85,29 +86,33 @@ public class PackageMojo extends AbstractFunctionMojo {
     public static final String BUILD_SUCCESS = "Successfully built Azure Functions.";
 
     public static final String FUNCTION_JSON = "function.json";
-    public static final String HOST_JSON = "host.json";
-    public static final String LOCAL_SETTINGS_JSON = "local.settings.json";
     public static final String EXTENSION_BUNDLE = "extensionBundle";
+    private static final String AZURE_FUNCTIONS_JAVA_CORE_LIBRARY = "azure-functions-java-core-library";
     private static final String DEFAULT_LOCAL_SETTINGS_JSON = "{ \"IsEncrypted\": false, \"Values\": " +
             "{ \"FUNCTIONS_WORKER_RUNTIME\": \"java\" } }";
     private static final String DEFAULT_HOST_JSON = "{\"version\":\"2.0\",\"extensionBundle\":" +
-            "{\"id\":\"Microsoft.Azure.Functions.ExtensionBundle\",\"version\":\"[1.*, 2.0.0)\"}}\n";
+            "{\"id\":\"Microsoft.Azure.Functions.ExtensionBundle\",\"version\":\"[3.*, 4.0.0)\"}}\n";
 
     private static final BindingEnum[] FUNCTION_WITHOUT_FUNCTION_EXTENSION =
         {BindingEnum.HttpOutput, BindingEnum.HttpTrigger};
     private static final String EXTENSION_BUNDLE_ID = "Microsoft.Azure.Functions.ExtensionBundle";
+    private static final String EXTENSION_BUNDLE_PREVIEW_ID = "Microsoft.Azure.Functions.ExtensionBundle.Preview";
     private static final String SKIP_INSTALL_EXTENSIONS_FLAG = "skipInstallExtensions flag is set, skip install extension";
     private static final String SKIP_INSTALL_EXTENSIONS_BUNDLE = "Extension bundle specified, skip install extension";
     private static final String CAN_NOT_FIND_ARTIFACT = "Cannot find the maven artifact, please run `mvn package` first.";
     //region Entry Point
 
+    /**
+     * Boolean flag to skip extension installation
+     */
     @Parameter(property = "functions.skipInstallExtensions", defaultValue = "false")
-    protected boolean skipInstallExtensions;
+    protected Boolean skipInstallExtensions;
 
     @Override
+    @AzureOperation("user/functionapp.package")
     protected void doExecute() throws AzureExecutionException {
         validateAppName();
-
+        validateFunctionCompatibility();
         promptCompileInfo();
 
         final AnnotationHandler annotationHandler = getAnnotationHandler();
@@ -202,7 +207,7 @@ public class PackageMojo extends AbstractFunctionMojo {
             try {
                 urlList.add(f.toURI().toURL());
             } catch (MalformedURLException e) {
-                Log.debug("Failed to get URL for file: " + f.toString());
+                Log.debug("Failed to get URL for file: " + f);
             }
         }
         return urlList;
@@ -276,7 +281,7 @@ public class PackageMojo extends AbstractFunctionMojo {
     protected void copyHostJson() throws IOException {
         Log.info("");
         Log.info(SAVING_HOST_JSON);
-        final File sourceHostJsonFile = new File(project.getBasedir(), HOST_JSON);
+        final File sourceHostJsonFile = getHostJsonFile();
         final File destHostJsonFile = Paths.get(getDeploymentStagingDirectoryPath(), HOST_JSON).toFile();
         copyFilesWithDefaultContent(sourceHostJsonFile, destHostJsonFile, DEFAULT_HOST_JSON);
         Log.info(SAVE_SUCCESS + destHostJsonFile.getAbsolutePath());
@@ -285,7 +290,7 @@ public class PackageMojo extends AbstractFunctionMojo {
     protected void copyLocalSettingsJson() throws IOException {
         Log.info("");
         Log.info(SAVING_LOCAL_SETTINGS_JSON);
-        final File sourceLocalSettingsJsonFile = new File(project.getBasedir(), LOCAL_SETTINGS_JSON);
+        final File sourceLocalSettingsJsonFile = getLocalSettingsJsonFile();
         final File destLocalSettingsJsonFile = Paths.get(getDeploymentStagingDirectoryPath(), LOCAL_SETTINGS_JSON).toFile();
         copyFilesWithDefaultContent(sourceLocalSettingsJsonFile, destLocalSettingsJsonFile, DEFAULT_LOCAL_SETTINGS_JSON);
         Log.info(SAVE_SUCCESS + destLocalSettingsJsonFile.getAbsolutePath());
@@ -328,12 +333,16 @@ public class PackageMojo extends AbstractFunctionMojo {
         if (libFolder.exists()) {
             FileUtils.cleanDirectory(libFolder);
         }
-        for (final Artifact artifact : project.getArtifacts()) {
-            if (!StringUtils.equalsIgnoreCase(artifact.getArtifactId(), "azure-functions-java-library")) {
-                FileUtils.copyFileToDirectory(artifact.getFile(), libFolder);
+        final Set<Artifact> artifacts = project.getArtifacts();
+        final String libraryToExclude = artifacts.stream()
+                .filter(artifact -> StringUtils.equalsAnyIgnoreCase(artifact.getArtifactId(), AZURE_FUNCTIONS_JAVA_CORE_LIBRARY))
+                .map(Artifact::getArtifactId).findFirst().orElse(AZURE_FUNCTIONS_JAVA_LIBRARY);
+        for (final Artifact artifact : artifacts) {
+            if (!StringUtils.equalsIgnoreCase(artifact.getArtifactId(), libraryToExclude)) {
+                copyFileToDirectory(artifact.getFile(), libFolder);
             }
         }
-        FileUtils.copyFileToDirectory(getArtifactFile(), new File(stagingDirectory));
+        copyFileToDirectory(getArtifactFile(), new File(stagingDirectory));
         Log.info(COPY_SUCCESS);
     }
 
@@ -374,14 +383,16 @@ public class PackageMojo extends AbstractFunctionMojo {
     }
 
     protected boolean isInstallingExtensionNeeded(Set<BindingEnum> bindingTypes) {
-        if (skipInstallExtensions) {
+        if (BooleanUtils.isTrue(skipInstallExtensions)) {
             Log.info(SKIP_INSTALL_EXTENSIONS_FLAG);
             return false;
         }
-        final JsonObject hostJson = readHostJson();
-        final JsonObject extensionBundle = hostJson == null ? null : hostJson.getAsJsonObject(EXTENSION_BUNDLE);
-        if (extensionBundle != null && extensionBundle.has("id") &&
-                StringUtils.equalsIgnoreCase(extensionBundle.get("id").getAsString(), EXTENSION_BUNDLE_ID)) {
+        final String extensionBundleId = Optional.ofNullable(readHostJson())
+                .map(node -> node.at("/extensionBundle/id"))
+                .filter(node -> !node.isMissingNode())
+                .map(JsonNode::asText)
+                .orElse(null);
+        if (StringUtils.equalsAnyIgnoreCase(extensionBundleId, EXTENSION_BUNDLE_ID, EXTENSION_BUNDLE_PREVIEW_ID)) {
             Log.info(SKIP_INSTALL_EXTENSIONS_BUNDLE);
             return false;
         }
@@ -392,17 +403,6 @@ public class PackageMojo extends AbstractFunctionMojo {
             return false;
         }
         return true;
-    }
-
-    protected JsonObject readHostJson() {
-        final File hostJson = new File(project.getBasedir(), HOST_JSON);
-        try (final FileInputStream fis = new FileInputStream(hostJson);
-             final Scanner scanner = new Scanner(new BOMInputStream(fis))) {
-            final String jsonRaw = scanner.useDelimiter("\\Z").next();
-            return JsonParser.parseString(jsonRaw).getAsJsonObject();
-        } catch (IOException e) {
-            return null;
-        }
     }
     // end region
 
@@ -434,5 +434,11 @@ public class PackageMojo extends AbstractFunctionMojo {
                 .distinct()
                 .collect(Collectors.toList());
         getTelemetryProxy().addDefaultProperty(TRIGGER_TYPE, StringUtils.join(bindingTypeSet, ","));
+    }
+
+    private static void copyFileToDirectory(@Nonnull final File srcFile, @Nonnull final File destFile) throws IOException {
+        if (!Objects.equals(srcFile.getParentFile(), destFile)) {
+            FileUtils.copyFileToDirectory(srcFile, destFile);
+        }
     }
 }

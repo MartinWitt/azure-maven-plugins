@@ -11,6 +11,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.utils.URIBuilder;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.UnsupportedEncodingException;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
@@ -20,13 +22,15 @@ import java.util.Objects;
 public abstract class JdbcUrl {
 
     private static final int MYSQL_DEFAULT_PORT = 3306;
+    private static final int POSTGRE_SQL_DEFAULT_PORT = 5432;
     private static final int SQL_SERVER_DEFAULT_PORT = 1433;
 
+    @Nonnull
     protected final URIBuilder uri;
     private String username;
     private String password;
 
-    private JdbcUrl(String url) {
+    private JdbcUrl(@Nonnull String url) {
         Preconditions.checkArgument(StringUtils.startsWith(url, "jdbc:"), "invalid jdbc url.");
         try {
             this.uri = new URIBuilder(url.substring(5));
@@ -35,36 +39,53 @@ public abstract class JdbcUrl {
         }
     }
 
-    public static JdbcUrl from(String connectionString) {
+    @Nonnull
+    public static JdbcUrl from(@Nonnull String connectionString) {
         if (StringUtils.startsWith(connectionString, "jdbc:mysql:")) {
             return new MySQLJdbcUrl(connectionString);
         } else if (StringUtils.startsWith(connectionString, "jdbc:sqlserver:")) {
             return new SQLServerJdbcUrl(connectionString);
+        } else if (StringUtils.startsWith(connectionString, "jdbc:postgresql:")) {
+            return new PostgreSQLJdbcUrl(connectionString);
         }
         throw new AzureToolkitRuntimeException("Unsupported jdbc url: %s", connectionString);
     }
 
-    public static JdbcUrl mysql(String serverHost, String database) {
+    @Nonnull
+    public static JdbcUrl mysql(@Nonnull String serverHost, @Nonnull String database) {
         return new MySQLJdbcUrl(String.format("jdbc:mysql://%s:%s/%s?serverTimezone=UTC&useSSL=true&requireSSL=false",
             encode(serverHost), MYSQL_DEFAULT_PORT, encode(database)));
     }
 
-    public static JdbcUrl mysql(String serverHost) {
+    @Nonnull
+    public static JdbcUrl mysql(@Nonnull String serverHost) {
         return new MySQLJdbcUrl(String.format("jdbc:mysql://%s:%s?serverTimezone=UTC&useSSL=true&requireSSL=false",
             encode(serverHost), MYSQL_DEFAULT_PORT));
     }
 
-    public static JdbcUrl sqlserver(String serverHost, String database) {
+    @Nonnull
+    public static JdbcUrl postgre(@Nonnull String serverHost, @Nonnull String database) {
+        // Postgre database name is required;
+        return new PostgreSQLJdbcUrl(String.format("jdbc:postgresql://%s:%s/%s?ssl=true&sslmode=require",
+            encode(serverHost), POSTGRE_SQL_DEFAULT_PORT, encode(database)));
+    }
+
+    @Nonnull
+    public static JdbcUrl sqlserver(@Nonnull String serverHost, @Nonnull String database) {
         return new SQLServerJdbcUrl(String.format("jdbc:sqlserver://%s:%s;encrypt=true;trustServerCertificate=false;loginTimeout=30;database=%s;",
             encode(serverHost), SQL_SERVER_DEFAULT_PORT, encode(database)));
     }
 
-    public static JdbcUrl sqlserver(String serverHost) {
+    @Nonnull
+    public static JdbcUrl sqlserver(@Nonnull String serverHost) {
         return new SQLServerJdbcUrl(String.format("jdbc:sqlserver://%s:%s;encrypt=true;trustServerCertificate=false;loginTimeout=30;",
             encode(serverHost), SQL_SERVER_DEFAULT_PORT));
     }
 
     abstract int getDefaultPort();
+
+    @Nonnull
+    public abstract String getDefaultDriverClass();
 
     public int getPort() {
         if (this.uri.getPort() >= 0) {
@@ -78,6 +99,7 @@ public abstract class JdbcUrl {
         return decode(this.uri.getHost());
     }
 
+    @Nullable
     public String getDatabase() {
         final String path = this.uri.getPath();
         return decode(StringUtils.startsWith(path, "/") ? path.substring(1) : path);
@@ -91,26 +113,31 @@ public abstract class JdbcUrl {
         return password;
     }
 
+    @Nonnull
     public JdbcUrl setServerHost(String serverHost) {
         this.uri.setHost(serverHost);
         return this;
     }
 
+    @Nonnull
     public JdbcUrl setDatabase(String database) {
         this.uri.setPath("/" + database);
         return this;
     }
 
+    @Nonnull
     public JdbcUrl setUsername(String username) {
         this.username = username;
         return this;
     }
 
+    @Nonnull
     public JdbcUrl setPassword(String password) {
         this.password = password;
         return this;
     }
 
+    @Nonnull
     public JdbcUrl setPort(int port) {
         this.uri.setPort(port);
         return this;
@@ -118,11 +145,11 @@ public abstract class JdbcUrl {
 
     @Override
     public String toString() {
-        String url = "jdbc:" + uri.toString();
+        String url = "jdbc:" + uri;
         return decode(url);
     }
 
-    private static String encode(String context) {
+    private static String encode(@Nonnull String context) {
         try {
             return URLEncoder.encode(context, "UTF-8");
         } catch (UnsupportedEncodingException e) {
@@ -130,7 +157,7 @@ public abstract class JdbcUrl {
         }
     }
 
-    private static String decode(String context) {
+    private static String decode(@Nonnull String context) {
         try {
             return URLDecoder.decode(context, "UTF-8");
         } catch (UnsupportedEncodingException e) {
@@ -139,7 +166,7 @@ public abstract class JdbcUrl {
     }
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (this == o) {
             return true;
         }
@@ -157,7 +184,7 @@ public abstract class JdbcUrl {
 
     private static class MySQLJdbcUrl extends JdbcUrl {
 
-        private MySQLJdbcUrl(String url) {
+        private MySQLJdbcUrl(@Nonnull String url) {
             super(url);
         }
 
@@ -166,6 +193,29 @@ public abstract class JdbcUrl {
             return MYSQL_DEFAULT_PORT;
         }
 
+        @Nonnull
+        @Override
+        public String getDefaultDriverClass() {
+            return "com.mysql.cj.jdbc.Driver";
+        }
+    }
+
+    private static class PostgreSQLJdbcUrl extends JdbcUrl {
+
+        private PostgreSQLJdbcUrl(@Nonnull String url) {
+            super(url);
+        }
+
+        @Override
+        int getDefaultPort() {
+            return POSTGRE_SQL_DEFAULT_PORT;
+        }
+
+        @Nonnull
+        @Override
+        public String getDefaultDriverClass() {
+            return "org.postgresql.Driver";
+        }
     }
 
     private static class SQLServerJdbcUrl extends JdbcUrl {
@@ -179,16 +229,24 @@ public abstract class JdbcUrl {
             return SQL_SERVER_DEFAULT_PORT;
         }
 
+        @Nonnull
+        @Override
+        public String getDefaultDriverClass() {
+            return "com.microsoft.sqlserver.jdbc.SQLServerDriver";
+        }
+
+        @Nonnull
         @Override
         public JdbcUrl setDatabase(String database) {
             this.uri.setParameter("database", database);
             return this;
         }
 
+        @Nullable
         @Override
         public String getDatabase() {
             return this.uri.getQueryParams().stream().filter(e -> StringUtils.equals(e.getName(), "database"))
-                    .map(NameValuePair::getValue).findFirst().orElse(null);
+                .map(NameValuePair::getValue).findFirst().orElse(null);
         }
 
         @Override
