@@ -7,15 +7,17 @@ package com.microsoft.azure.maven.webapp;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.microsoft.azure.maven.AbstractAppServiceMojo;
+import com.microsoft.azure.maven.appservice.AbstractAppServiceMojo;
 import com.microsoft.azure.maven.utils.SystemPropertyUtils;
 import com.microsoft.azure.maven.webapp.configuration.Deployment;
 import com.microsoft.azure.maven.webapp.configuration.MavenRuntimeConfig;
 import com.microsoft.azure.maven.webapp.parser.ConfigParser;
+import com.microsoft.azure.toolkit.lib.Azure;
+import com.microsoft.azure.toolkit.lib.account.IAzureAccount;
 import com.microsoft.azure.toolkit.lib.appservice.AzureAppService;
 import com.microsoft.azure.toolkit.lib.appservice.model.OperatingSystem;
-import com.microsoft.azure.toolkit.lib.common.exception.AzureExecutionException;
 import com.microsoft.azure.toolkit.lib.common.exception.AzureToolkitRuntimeException;
+import com.microsoft.azure.toolkit.lib.common.model.Subscription;
 import com.microsoft.azure.toolkit.lib.common.validator.SchemaValidator;
 import com.microsoft.azure.toolkit.lib.common.validator.ValidationMessage;
 import com.microsoft.azure.toolkit.lib.legacy.appservice.AppServiceUtils;
@@ -23,6 +25,7 @@ import com.microsoft.azure.toolkit.lib.legacy.appservice.DeploymentSlotSetting;
 import com.microsoft.azure.toolkit.lib.legacy.appservice.DockerImageType;
 import lombok.Getter;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.maven.plugins.annotations.Parameter;
 
@@ -43,6 +46,8 @@ public abstract class AbstractWebAppMojo extends AbstractAppServiceMojo {
     public static final String JAVA_WEB_CONTAINER_KEY = "javaWebContainer";
     public static final String DOCKER_IMAGE_TYPE_KEY = "dockerImageType";
     public static final String DEPLOYMENT_TYPE_KEY = "deploymentType";
+    public static final String PRICING_TIER_KEY = "pricingTier";
+    public static final String REGION_KEY = "region";
     public static final String OS_KEY = "os";
     public static final String SCHEMA_VERSION_KEY = "schemaVersion";
     public static final String DEPLOY_TO_SLOT_KEY = "isDeployToSlot";
@@ -51,59 +56,62 @@ public abstract class AbstractWebAppMojo extends AbstractAppServiceMojo {
     //region Properties
 
     /**
-     * App Service pricing tier, which will only be used to create Web App at the first time.<p>
-     * Below is the list of supported pricing tier:
-     * <ul>
-     *     <li>F1</li>
-     *     <li>D1</li>
-     *     <li>B1</li>
-     *     <li>B2</li>
-     *     <li>B3</li>
-     *     <li>S1</li>
-     *     <li>S2</li>
-     *     <li>S3</li>
-     *     <li>P1V2</li>
-     *     <li>P2V2</li>
-     *     <li>P3V2</li>
-     * </ul>
+     * Pricing for web app <p>
+     * Supported values : F1, D1, B1, B2, B3, S1, S2, S3, P1V2, P2V2, P3V2, P1V3, P2V3, P3V3
+     * @since 0.1.0
      */
     @JsonProperty
     @Parameter(property = "webapp.pricingTier")
     protected String pricingTier;
 
     /**
-     * Flag to control whether stop Web App during deployment.
+     * Boolean flag to control whether stop web app during deployment.
+     * @deprecated Please use `restartSite` instead.
+     * @since 0.1.0
      */
     @Getter
     @JsonProperty
+    @Deprecated
     @Parameter(property = "webapp.stopAppDuringDeployment", defaultValue = "false")
-    protected boolean stopAppDuringDeployment;
+    protected Boolean stopAppDuringDeployment;
 
     /**
-     * Skip execution.
-     *
+     * Boolean flag to control whether to restart site after deployment. By default the value is true.
+     * @since 2.8.0
+     */
+    @Getter
+    @JsonProperty
+    @Parameter(property = "webapp.stopAppDuringDeployment", defaultValue = "true")
+    protected Boolean restartSite;
+
+    /**
+     * Boolean flag to skip the execution of maven plugin for azure webapp
      * @since 0.1.4
      */
     @JsonProperty
     @Parameter(property = "webapp.skip", defaultValue = "false")
-    protected boolean skip;
+    protected Boolean skip;
 
     /**
-     * TODO(andxu): move this flag to AbstractAzureMojo
+     * Boolean flag to skip the resource creation, will throw exception if target resource does not exist in this case
+     * @since 2.2.0
      */
     @JsonIgnore
     @Parameter(property = "azure.resource.create.skip", defaultValue = "false")
-    protected boolean skipAzureResourceCreate;
+    protected Boolean skipAzureResourceCreate;
 
     /**
-     * TODO(andxu): move this flag to AbstractAzureMojo
+     * Boolean flag to skip the resource creation, will throw exception if target resource does not exist in this case
+     * @since 2.2.0
      */
     @JsonIgnore
     @Parameter(property = "skipCreateAzureResource")
-    protected boolean skipCreateAzureResource;
+    protected Boolean skipCreateAzureResource;
 
     /**
-     * App Service region, which will only be used to create App Service at the first time.
+     * Region for web app
+     * Supported values: westus, westus2, eastus, eastus2, northcentralus, southcentralus, westcentralus, canadacentral, canadaeast, brazilsouth, northeurope,
+     * westeurope, uksouth, eastasia, southeastasia, japaneast, japanwest, australiaeast, australiasoutheast, centralindia, southindia ...
      */
     @JsonProperty
     @Parameter(property = "webapp.region")
@@ -111,33 +119,84 @@ public abstract class AbstractWebAppMojo extends AbstractAppServiceMojo {
 
     /**
      * Schema version, which will be used to indicate the version of settings schema to use.
-     *
-     * @since 2.0.0
+     * @since 1.4.1
      */
     @JsonProperty
+    @Deprecated
     @Parameter(property = "schemaVersion", defaultValue = "v2")
     protected String schemaVersion;
 
     /**
-     * Runtime setting
-     *
-     * @since 2.0.0
+     * Runtime environment of web app <p>
+     * Properties for Windows/Linux web app
+     * <ul>
+     *     <li> os: Operating system for the web app, default to be Windows. </li>
+     *     <li> javaVersion: Java runtime version for the web app, supported values are `Java 8`, `Java 11` and `Java 17`. </li>
+     *     <li> webContainer: Java web container for the web app, supported values are `Tomcat 8.5`, `Tomcat 9.0`, `Tomcat 10.0`, `Java SE`, `Jbosseap 7`(Linux only). </li>
+     * </ul>
+     * <pre>
+     * {@code
+     * <runtime>
+     *     <os>windows</os>
+     *     <javaVersion>Java 8</javaVersion>
+     *     <webContainer>Java SE</webContainer>
+     * </runtime>
+     * }
+     * </pre>
+     * Properties for Docker web app
+     * <ul>
+     *     <li> image: Name of the docker image to deploy. </li>
+     *     <li> registryUrl: Docker repository of the image, could be omitted for docker hub. </li>
+     *     <li> serverId: The authentication profile id in maven settings.xml. For private docker image,
+     *     please set your username and password in maven settings.xml and refer it with `serverId` in runtime configuration. </li>
+     * </ul>
+     * <pre>
+     * {@code
+     * <runtime>
+     *     <os>docker</os>
+     *     <image>[hub-user/]repo-name[:tag]</image>
+     *     <serverId></serverId>
+     *     <registryUrl></registryUrl> <!- could be omitted for docker hub images -->
+     * </runtime>
+     * }
+     * </pre>
+     * @since 1.4.0
      */
     @JsonProperty
     @Parameter(property = "runtime")
     protected MavenRuntimeConfig runtime;
 
     /**
-     * Deployment setting
-     *
+     * Configuration to specify the artifacts to deploy <p>
+     * Parameters for resource
+     * <ul>
+     *     <li> type: Specifies where the resource type of the files to be deployed, valid values are: `jar`, `war`, `ear`,
+     *     `lib`, `static`, `startup`, `zip` and `script`. </li>
+     *     <li> directory: Specifies where the resources are stored. </li>
+     *     <li> targetPath: Specifies the target path where the resources will be deployed to. </li>
+     *     <li> includes: A list of patterns to include, e.g. `*.jar`. </li>
+     *     <li> excludes: A list of patterns to exclude, e.g. `*.xml`. </li>
+     * </ul>
+     * <pre>
+     * {@code
+     * <deployment>
+     *     <resources>
+     *         <resource>
+     *             <type>jar</type>
+     *             <directory>./target</directory>
+     *             <includes>
+     *                 <include>*.jar</include>
+     *             </includes>
+     *         </resource>
+     *   </resources>
+     * </deployment>
+     * }
+     * </pre>
      * @since 2.0.0
      */
     @JsonProperty
     @Parameter(property = "deployment")
     protected Deployment deployment;
-
-    @JsonIgnore
-    private WebAppConfiguration webAppConfiguration;
 
     @JsonIgnore
     protected File stagingDirectory;
@@ -150,7 +209,7 @@ public abstract class AbstractWebAppMojo extends AbstractAppServiceMojo {
 
     @JsonIgnore
     @Getter
-    protected ConfigParser configParser = new ConfigParser(this);
+    protected final ConfigParser configParser = new ConfigParser(this);
 
     //endregion
 
@@ -230,18 +289,15 @@ public abstract class AbstractWebAppMojo extends AbstractAppServiceMojo {
         } else {
             map.put(DOCKER_IMAGE_TYPE_KEY, DockerImageType.NONE.toString());
         }
+        map.put(PRICING_TIER_KEY, pricingTier);
+        map.put(REGION_KEY, region);
         map.put(JAVA_VERSION_KEY, Optional.ofNullable(runtimeConfig).map(MavenRuntimeConfig::getJavaVersion).orElse(StringUtils.EMPTY));
         map.put(JAVA_WEB_CONTAINER_KEY, Optional.ofNullable(runtimeConfig).map(MavenRuntimeConfig::getWebContainer).orElse(StringUtils.EMPTY));
-        try {
-            map.put(DEPLOYMENT_TYPE_KEY, getDeploymentType().toString());
-        } catch (AzureExecutionException e) {
-            map.put(DEPLOYMENT_TYPE_KEY, "Unknown deployment type.");
-        }
         final boolean isDeployToSlot = Optional.ofNullable(getDeploymentSlotSetting()).map(DeploymentSlotSetting::getName)
                 .map(StringUtils::isNotEmpty).orElse(false);
         map.put(DEPLOY_TO_SLOT_KEY, String.valueOf(isDeployToSlot));
 
-        map.put(SKIP_CREATE_RESOURCE_KEY, String.valueOf(skipAzureResourceCreate || skipCreateAzureResource));
+        map.put(SKIP_CREATE_RESOURCE_KEY, String.valueOf(BooleanUtils.isTrue(skipCreateAzureResource)));
         return map;
     }
 
@@ -256,7 +312,12 @@ public abstract class AbstractWebAppMojo extends AbstractAppServiceMojo {
 
     @Override
     public String getSubscriptionId() {
-        return appServiceClient == null ? this.subscriptionId : appServiceClient.getDefaultSubscription().getId();
+        if (appServiceClient == null) {
+            return this.subscriptionId;
+        }
+        final List<Subscription> subscriptions = Azure.az(IAzureAccount.class).account().getSelectedSubscriptions();
+        final Subscription subscription = subscriptions.get(0);
+        return subscription.getId();
     }
 
     @Override
@@ -266,7 +327,7 @@ public abstract class AbstractWebAppMojo extends AbstractAppServiceMojo {
                 if (stagingDirectory == null) {
                     final String outputFolder = this.getPluginName().replaceAll(MAVEN_PLUGIN_POSTFIX, "");
                     final String stagingDirectoryPath = Paths.get(this.getBuildDirectoryAbsolutePath(),
-                            outputFolder, String.format("%s-%s", this.getAppName(), UUID.randomUUID().toString())
+                            outputFolder, String.format("%s-%s", this.getAppName(), UUID.randomUUID())
                     ).toString();
                     stagingDirectory = new File(stagingDirectoryPath);
                     // If staging directory doesn't exist, create one and delete it on exit
